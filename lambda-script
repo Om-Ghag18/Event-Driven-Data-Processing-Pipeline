@@ -1,0 +1,76 @@
+import boto3
+import os
+import csv
+import traceback
+
+def lambda_handler(event, context):
+    s3 = boto3.client('s3')
+    sns = boto3.client('sns')
+
+    # 1. Get the bucket and key of the uploaded file from the event
+    try:
+        bucket = event['Records'][0]['s3']['bucket']['name']
+        key = event['Records'][0]['s3']['object']['key']
+        print(f"Processing file: {key} from bucket: {bucket}")
+    except Exception as e:
+        print("Could not find S3 info in event:", e)
+        print(traceback.format_exc())
+        return {"statusCode": 400, "body": "Bad S3 event data."}
+
+    # 2. Download the file from S3 to /tmp
+    tmp_path = '/tmp/input.csv'
+    try:
+        s3.download_file(bucket, key, tmp_path)
+        print(f"Downloaded file to {tmp_path}")
+    except Exception as e:
+        print("Error downloading file from S3:", e)
+        print(traceback.format_exc())
+        return {"statusCode": 500, "body": "Failed to download file from S3."}
+
+    # 3. Count data rows in CSV (excluding header)
+    try:
+        with open(tmp_path, newline='') as csvfile:
+            reader = csv.reader(csvfile)
+            header = next(reader, None)
+            row_count = sum(1 for row in reader)
+        print(f"Row count (excluding header): {row_count}")
+    except Exception as e:
+        print("Error processing CSV file:", e)
+        print(traceback.format_exc())
+        return {"statusCode": 500, "body": "Failed to read/process CSV file."}
+
+    # 4. Prepare and upload report to reports bucket
+    summary = f"File '{key}' in bucket '{bucket}' has {row_count} data rows."
+    report_bucket = os.environ.get('REPORT_BUCKET')
+    report_key = key + '.report.txt'
+    try:
+        if report_bucket:
+            s3.put_object(Bucket=report_bucket, Key=report_key, Body=summary)
+            print(f"Report uploaded as {report_key} to {report_bucket}")
+        else:
+            print("REPORT_BUCKET env var not set.")
+    except Exception as e:
+        print("Error uploading report to S3:", e)
+        print(traceback.format_exc())
+
+    # 5. Publish report to SNS topic
+    sns_topic_arn = os.environ.get('SNS_TOPIC')
+    print("SNS_TOPIC env:", sns_topic_arn)
+    try:
+        if sns_topic_arn:
+            response = sns.publish(
+                TopicArn=sns_topic_arn,
+                Subject="S3 Data Processing Report",
+                Message=summary
+            )
+            print("SNS publish response:", response)
+        else:
+            print("SNS_TOPIC env var is missing or empty.")
+    except Exception as e:
+        print("Error publishing to SNS:", e)
+        print(traceback.format_exc())
+
+    return {
+        'statusCode': 200,
+        'body': f"Report saved as {report_key} and notification sent via SNS."
+    }
